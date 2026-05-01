@@ -26,6 +26,7 @@ import string
 from django.http import HttpResponse, JsonResponse
 from django.core.files.base import ContentFile
 from django.views.decorators.csrf import csrf_exempt
+from django.db.models import Q
 from .models import (
     Employee, Attendance, Deduction, Payment,
     Company, SackedEmployee, Notification, OTP, ExportToken
@@ -35,7 +36,7 @@ from .serializers import (
     DeductionSerializer, PaymentSerializer, CompanySerializer,
     SackedEmployeeSerializer, NotificationSerializer
 )
-from .paystack import PaystackAPI
+from .paystack import PaystackAPI, NIGERIAN_BANKS
 from .permissions import (
     IsAdmin, CanCreateEmployee, IsSackAdmin, IsPayrollAdmin,
     IsDeductionAdmin, CanEditNotification, CanViewAndEditCompany
@@ -47,6 +48,21 @@ from rest_framework.throttling import ScopedRateThrottle
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
+
+
+def get_employee_bank_code(employee):
+    bank_code = getattr(employee, 'bank_code', None)
+    if bank_code:
+        return bank_code
+
+    normalized_name = (employee.bank_name or '').strip().lower()
+    for code, name in NIGERIAN_BANKS.items():
+        if normalized_name == (name or '').strip().lower():
+            if hasattr(employee, 'bank_code'):
+                employee.bank_code = code
+                employee.save(update_fields=['bank_code'])
+            return code
+    return None
 
 
 # ─────────────────────────────────────────
@@ -560,29 +576,22 @@ class AttendanceViewSet(viewsets.ModelViewSet):
         return []
 
     def perform_create(self, serializer):
-        try:
-            employee = Employee.objects.get(user=self.request.user)
-        except Employee.DoesNotExist:
-            raise serializers.ValidationError(
-                {"error": "Employee profile not found for this user."}
-            )
-        attendance, created = Attendance.objects.get_or_create(
-            employee=employee,
-            date=timezone.now().date()
-        )
-        if not attendance.clock_in_time:
-            attendance.clock_in_time = timezone.now()
-        elif not attendance.clock_out_time:
-            attendance.clock_out_time = timezone.now()
-        else:
-            raise serializers.ValidationError({"error": "Attendance already completed today."})
-        attendance.save()
+        serializer.save()
 
     def _get_employee(self, request):
         employee_id = request.data.get('employee_id') or request.data.get('employee')
-        if request.user.is_superuser or request.user.role == 'admin':
+        can_select_employee = (
+            request.user.is_superuser
+            or request.user.role == 'admin'
+            or getattr(request.user, 'is_employee_admin', False)
+            or getattr(request.user, 'is_staff', False)
+        )
+        if can_select_employee:
             if employee_id:
-                return Employee.objects.get(employee_id=employee_id)
+                return Employee.objects.get(
+                    Q(id=employee_id) | Q(employee_id=employee_id),
+                    status='active'
+                )
         return Employee.objects.get(user=request.user)
 
     @staticmethod
@@ -920,7 +929,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
             )
 
         # bank_code is required for Paystack transfers
-        bank_code = getattr(employee, 'bank_code', None)
+        bank_code = get_employee_bank_code(employee)
         if not bank_code:
             return Response(
                 {'error': 'Employee bank_code is missing. Update employee record first.'},
@@ -1033,7 +1042,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
             try:
                 employee = Employee.objects.get(id=emp_id, status='active')
 
-                bank_code = getattr(employee, 'bank_code', None)
+                bank_code = get_employee_bank_code(employee)
                 if not bank_code:
                     errors.append(f"{employee.name}: missing bank_code")
                     continue

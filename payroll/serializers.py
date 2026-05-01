@@ -66,17 +66,20 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class EmployeeSerializer(serializers.ModelSerializer):
+    user = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.all(), required=False, allow_null=True, write_only=True
+    )
     # REMOVED: user field that was causing serialization issues
     # The user relationship is handled internally, not exposed in API
 
     class Meta:
         model = Employee
         fields = [
-            'id', 'employee_id', 'name', 'type', 'location', 
-            'salary', 'phone', 'email', 'bank_name', 'account_number',
+            'id', 'user', 'employee_id', 'name', 'type', 'location',
+            'salary', 'phone', 'email', 'bank_name', 'bank_code', 'account_number',
             'account_holder', 'status', 'join_date', 'id_sequence', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id_sequence', 'created_at', 'updated_at', 'id']
+        read_only_fields = ['employee_id', 'id_sequence', 'created_at', 'updated_at', 'id']
     
     def validate_name(self, value):
         if not value or not value.strip():
@@ -130,6 +133,36 @@ class EmployeeSerializer(serializers.ModelSerializer):
         if queryset.exists():
             raise serializers.ValidationError("This email is already registered")
         return value
+
+    def create(self, validated_data):
+        provided_user = validated_data.pop('user', None)
+        if not validated_data.get('join_date'):
+            validated_data['join_date'] = timezone.now().date()
+
+        if provided_user:
+            return Employee.objects.create(user=provided_user, **validated_data)
+
+        username_base = (
+            validated_data.get('email', '').split('@')[0]
+            or validated_data.get('employee_id')
+            or validated_data.get('name', 'employee').lower().replace(' ', '_')
+        )
+        username = username_base
+        counter = 1
+        while User.objects.filter(username=username).exists():
+            counter += 1
+            username = f"{username_base}{counter}"
+
+        with transaction.atomic():
+            user = User(
+                username=username,
+                email=validated_data.get('email') or '',
+                role=validated_data.get('type') or 'staff',
+                phone=validated_data.get('phone') or '',
+            )
+            user.set_unusable_password()
+            user.save()
+            return Employee.objects.create(user=user, **validated_data)
 
 
 class AttendanceSerializer(serializers.ModelSerializer):

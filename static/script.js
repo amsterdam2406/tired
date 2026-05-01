@@ -8,7 +8,7 @@
 // CONFIGURATION
 // ==========================================
 const CONFIG = {
-    API_BASE_URL: window.location.origin,  // FIXED: Dynamic base URL - now supports HTTPS
+    API_BASE_URL: window.location.origin,  // FIXED: Dynamic base URL
     TOKEN_REFRESH_INTERVAL: 25 * 60 * 1000, // FIXED: Match 30min token - 5min buffer
     MAX_LOGIN_ATTEMPTS: 5,
     LOCKOUT_DURATION: 15 * 60 * 1000,
@@ -98,6 +98,21 @@ function buildUrl(url, params = {}) {
 
 function idsMatch(left, right) {
     return String(left) === String(right);
+}
+
+function isJwtExpired(token) {
+    if (!token) return true;
+    try {
+        const [, payload] = token.split('.');
+        if (!payload) return true;
+        const normalizedPayload = payload.replace(/-/g, '+').replace(/_/g, '/');
+        const paddedPayload = normalizedPayload.padEnd(Math.ceil(normalizedPayload.length / 4) * 4, '=');
+        const data = JSON.parse(atob(paddedPayload));
+        return !data.exp || Date.now() >= (data.exp * 1000) - 30000;
+    } catch (err) {
+        console.warn('Could not parse JWT expiry:', err);
+        return true;
+    }
 }
 
 // ==========================================
@@ -224,8 +239,8 @@ function closeModal(id) {
 // ==========================================
 
 async function apiRequest(url, options = {}) {
-    // FIXED: Use CONFIG.API_BASE_URL for consistent API calls
-    const baseUrl = CONFIG.API_BASE_URL;
+    // FIXED: Ensure proper URL construction
+    const baseUrl = window.location.origin;
     const fullUrl = url.startsWith('http') ? url : `${baseUrl}${url.startsWith('/') ? '' : '/'}${url}`;
     
     const token = AppState.accessToken || localStorage.getItem('accessToken');
@@ -241,8 +256,7 @@ async function apiRequest(url, options = {}) {
         headers,
         body: options.body instanceof FormData 
             ? options.body 
-            : (options.body ? JSON.stringify(options.body) : null),
-        signal: options.signal // Add abort signal support
+            : (options.body ? JSON.stringify(options.body) : null)
     };
 
     try {
@@ -250,13 +264,13 @@ async function apiRequest(url, options = {}) {
 
         if (response.status === 401) {
             if (url.includes('/login/')) {
-                return { success: false, message: 'Invalid credentials' };
+                return { success: false, status: response.status, message: 'Invalid credentials' };
             }
             const refreshed = await refreshAccessToken();
             if (refreshed) return apiRequest(url, options);
             logout();
             showToast('Session expired. Please login again.', 'error');
-            return { success: false, message: 'Session expired. Please login again.' };
+            return { success: false, status: response.status, message: 'Session expired. Please login again.' };
         }
 
         if (response.status === 429) {
@@ -264,6 +278,7 @@ async function apiRequest(url, options = {}) {
             const waitTime = errorData.detail?.match(/\d+/)?.[0] || 'unknown';
             return { 
                 success: false, 
+                status: response.status,
                 message: `Too many requests. Please wait ${waitTime} seconds.` 
             };
         }
@@ -273,11 +288,13 @@ async function apiRequest(url, options = {}) {
         if (!response.ok) {
             return { 
                 success: false, 
+                status: response.status,
+                data,
                 message: data.detail || data.error || data.message || `Request failed (${response.status})` 
             };
         }
 
-        return { success: true, data };
+        return { success: true, status: response.status, data };
 
     } catch (err) {
         console.error('API Error:', err);
@@ -394,21 +411,142 @@ function populateBankSelects() {
     });
 }
 
+function setAccountVerificationStatus(statusEl, message, className = 'text-muted') {
+    if (!statusEl) return;
+    statusEl.textContent = message;
+    statusEl.className = className;
+}
+
+async function verifyBankAccountFields({ accountInput, bankSelect, holderInput, statusEl, manual = false }) {
+    const accountNumber = accountInput?.value.trim();
+    const selectedOption = bankSelect?.options[bankSelect.selectedIndex];
+    const bankCode = selectedOption?.dataset?.code;
+    const verificationKey = `${bankCode || ''}:${accountNumber || ''}`;
+
+    if (!accountNumber || !/^\d{10}$/.test(accountNumber)) {
+        if (manual) showToast('Enter valid 10-digit account number', 'error');
+        return false;
+    }
+    if (!bankCode) {
+        if (manual) showToast('Select a valid bank first', 'error');
+        return false;
+    }
+    if (AppState.pendingAccountVerificationKey === verificationKey) {
+        if (manual) showToast('Verification already in progress', 'info');
+        return false;
+    }
+    if (AppState.lastVerifiedAccountKey === verificationKey && holderInput?.value.trim()) {
+        setAccountVerificationStatus(statusEl, `Verified: ${holderInput.value.trim()}`, 'text-success');
+        return true;
+    }
+
+    AppState.pendingAccountVerificationKey = verificationKey;
+    holderInput.value = 'Verifying...';
+    holderInput.disabled = true;
+    holderInput.readOnly = true;
+    holderInput.style.background = '#f8f9fa';
+    setAccountVerificationStatus(statusEl, 'Verifying with Paystack...', 'text-info');
+
+    try {
+        const res = await apiRequest('/api/paystack/verify-account/', {
+            method: 'POST',
+            body: { account_number: accountNumber, bank_code: bankCode }
+        });
+
+        if (res.success && res.data?.status === true && res.data?.data?.account_name) {
+            holderInput.value = res.data.data.account_name;
+            holderInput.style.background = '#d4edda';
+            AppState.lastVerifiedAccountKey = verificationKey;
+            setAccountVerificationStatus(statusEl, `Verified: ${res.data.data.account_name}`, 'text-success');
+            if (manual) showToast('Account verified successfully', 'success');
+            return true;
+        }
+
+        holderInput.value = '';
+        holderInput.style.background = '#f8d7da';
+        AppState.lastVerifiedAccountKey = null;
+        setAccountVerificationStatus(
+            statusEl,
+            res.message || res.data?.message || 'Account could not be verified. Check bank and account number.',
+            'text-danger'
+        );
+        if (manual) showToast(res.message || res.data?.message || 'Verification failed', 'error');
+        return false;
+    } catch (err) {
+        holderInput.value = '';
+        holderInput.style.background = '#f8d7da';
+        AppState.lastVerifiedAccountKey = null;
+        setAccountVerificationStatus(statusEl, 'Verification service unavailable. Try again later.', 'text-warning');
+        if (manual) showToast('Verification service unavailable', 'error');
+        return false;
+    } finally {
+        AppState.pendingAccountVerificationKey = null;
+        holderInput.disabled = false;
+        holderInput.readOnly = true;
+        holderInput.placeholder = 'Auto-filled after verification';
+    }
+}
+
+function setupAccountVerification({ accountInputId, bankSelectId, holderInputId, statusId }) {
+    const accountInput = document.getElementById(accountInputId);
+    const bankSelect = document.getElementById(bankSelectId);
+    const holderInput = document.getElementById(holderInputId);
+    const statusEl = document.getElementById(statusId);
+
+    if (!accountInput || !bankSelect || !holderInput) return null;
+
+    holderInput.readOnly = true;
+    const verifyCurrentAccount = debounce(() => verifyBankAccountFields({
+        accountInput, bankSelect, holderInput, statusEl
+    }), 800);
+
+    accountInput.addEventListener('input', () => {
+        holderInput.value = '';
+        holderInput.style.background = '#f8f9fa';
+        AppState.lastVerifiedAccountKey = null;
+        if (accountInput.value.trim().length === 10) {
+            verifyCurrentAccount();
+        } else {
+            setAccountVerificationStatus(statusEl, 'Enter 10-digit account number to auto-verify', 'text-muted');
+        }
+    });
+
+    bankSelect.addEventListener('change', () => {
+        holderInput.value = '';
+        holderInput.style.background = '#f8f9fa';
+        AppState.lastVerifiedAccountKey = null;
+        setAccountVerificationStatus(statusEl, 'Enter 10-digit account number to auto-verify', 'text-muted');
+        if (accountInput.value.trim().length === 10) verifyCurrentAccount();
+    });
+
+    return { accountInput, bankSelect, holderInput, statusEl };
+}
+
 // ==========================================
 // FIXED: AUTO BANK VERIFICATION & NAME FILL
 // ==========================================
 
 function setupBankVerification() {
+    setupAccountVerification({
+        accountInputId: 'accountNumber',
+        bankSelectId: 'accountBankName',
+        holderInputId: 'accountHolderName',
+        statusId: 'verificationStatus'
+    });
+    setupAccountVerification({
+        accountInputId: 'newEmployeeAccountNumber',
+        bankSelectId: 'newEmployeeBankName',
+        holderInputId: 'newEmployeeAccountHolder',
+        statusId: 'newEmployeeVerificationStatus'
+    });
+    return;
+
     const accountInput = document.getElementById('accountNumber');
     const bankSelect = document.getElementById('accountBankName');
     const holderInput = document.getElementById('accountHolderName');
     const statusEl = document.getElementById('verificationStatus');
     
     if (!accountInput || !bankSelect || !holderInput) return;
-    
-    // Make account holder name readonly - no manual input allowed
-    holderInput.readOnly = true;
-    holderInput.placeholder = 'Auto-filled from bank verification';
 
     const verifyCurrentAccount = debounce(async () => {
         const accountNumber = accountInput.value.trim();
@@ -430,20 +568,13 @@ function setupBankVerification() {
         }
         
         try {
-            // Add 20-second timeout for account verification
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 seconds
-            
             const res = await apiRequest('/api/paystack/verify-account/', {
                 method: 'POST',
                 body: {
                     account_number: accountNumber,
                     bank_code: bankCode
-                },
-                signal: controller.signal // Pass the abort signal
+                }
             });
-            
-            clearTimeout(timeoutId); // Clear timeout if request completes
             
             // FIXED: Check Paystack response format properly
             if (res.success && res.data?.status === true && res.data?.data?.account_name) {
@@ -458,44 +589,29 @@ function setupBankVerification() {
             } else {
                 holderInput.value = '';
                 holderInput.style.background = '#f8d7da'; // Light red
-                const msg = res.message || res.data?.message || 'Could not verify account. Please check account details.';
+                const msg = res.message || res.data?.message || 'Account could not be verified. Check bank and account number.';
                 AppState.lastVerifiedAccountKey = null;
                 if (statusEl) {
                     statusEl.textContent = msg;
                     statusEl.className = 'text-warning';
                 }
-                // No manual input allowed - keep readonly
-                showToast(msg, 'warning');
+                holderInput.readOnly = true;
             }
         } catch (err) {
             console.error('Verification error:', err);
             holderInput.value = '';
-            holderInput.readOnly = true; // Keep readonly
+            holderInput.readOnly = true;
             AppState.lastVerifiedAccountKey = null;
-            if (err.name === 'AbortError') {
-                if (statusEl) {
-                    statusEl.textContent = 'Verification timed out due to slow connection. Please try again.';
-                    statusEl.className = 'text-warning';
-                }
-                showToast('Verification timed out. Check your connection and try again.', 'warning');
-            } else if (err.status === 429) {
-                if (statusEl) {
-                    statusEl.textContent = 'Too many requests. Please wait a moment and try again.';
-                    statusEl.className = 'text-warning';
-                }
-                showToast('Account verification rate limited. Please wait before trying again.', 'warning');
-            } else {
-                if (statusEl) {
-                    statusEl.textContent = 'Verification service unavailable. Please check account details.';
-                    statusEl.className = 'text-warning';
-                }
+            if (statusEl) {
+                statusEl.textContent = 'Verification service unavailable. Try again later.';
+                statusEl.className = 'text-warning';
             }
         } finally {
             AppState.pendingAccountVerificationKey = null;
             holderInput.disabled = false;
             holderInput.placeholder = 'Account Holder Name';
         }
-    }, 100); // Reduced debounce to 100ms for near-instant response
+    }, 800);
 
     accountInput.addEventListener('input', verifyCurrentAccount);
     bankSelect.addEventListener('change', () => {
@@ -503,7 +619,7 @@ function setupBankVerification() {
         holderInput.value = '';
         holderInput.style.background = '';
         if (statusEl) {
-            statusEl.textContent = 'Enter 10-digit account number to auto-verify';
+            statusEl.textContent = 'Enter account number and leave field to auto-verify';
             statusEl.className = 'text-muted';
         }
         if (accountInput.value.trim().length === 10) {
@@ -518,10 +634,12 @@ async function verifyBankAccountManual() {
     const bankSelect = document.getElementById('accountBankName');
     const holderInput = document.getElementById('accountHolderName');
     const statusEl = document.getElementById('verificationStatus');
+    return verifyBankAccountFields({ accountInput, bankSelect, holderInput, statusEl, manual: true });
     
     const accountNumber = accountInput?.value.trim();
     const selectedOption = bankSelect?.options[bankSelect.selectedIndex];
     const bankCode = selectedOption?.dataset?.code;
+    const verificationKey = `${bankCode || ''}:${accountNumber || ''}`;
     
     if (!accountNumber || accountNumber.length !== 10) {
         showToast('Enter valid 10-digit account number', 'error');
@@ -548,14 +666,10 @@ async function verifyBankAccountManual() {
             holderInput.value = res.data.data.account_name;
             holderInput.style.background = '#d4edda';
             AppState.lastVerifiedAccountKey = verificationKey;
-            AppState.lastVerifiedAccountKey = verificationKey;
-            AppState.lastVerifiedAccountKey = verificationKey;
-            AppState.lastVerifiedAccountKey = verificationKey;
             statusEl.textContent = `✓ Verified: ${res.data.data.account_name}`;
             statusEl.className = 'text-success';
             statusEl.textContent = `Verified: ${res.data.data.account_name}`;
             showToast('Account verified successfully', 'success');
-            AppState.lastVerifiedAccountKey = verificationKey;
         } else {
             holderInput.value = '';
             holderInput.style.background = '#f8d7da';
@@ -564,18 +678,17 @@ async function verifyBankAccountManual() {
             AppState.lastVerifiedAccountKey = null;
             AppState.lastVerifiedAccountKey = null;
             const errorMsg = res.data?.message || 'Verification failed';
-            statusEl.textContent = `✗ ${errorMsg} - enter name manually`;
+            statusEl.textContent = errorMsg;
             statusEl.className = 'text-danger';
-            statusEl.textContent = `${res.message || res.data?.message || 'Verification failed'} - enter name manually`;
-            holderInput.readOnly = false;
-            holderInput.focus();
+            statusEl.textContent = res.message || res.data?.message || 'Verification failed';
+            holderInput.readOnly = true;
             showToast(errorMsg, 'error');
         }
     } catch (err) {
         holderInput.value = '';
-        holderInput.readOnly = false;
+        holderInput.readOnly = true;
         AppState.lastVerifiedAccountKey = null;
-        statusEl.textContent = 'Error verifying - enter name manually';
+        statusEl.textContent = 'Error verifying account. Try again later.';
         statusEl.className = 'text-warning';
         showToast('Verification service unavailable', 'error');
     } finally {
@@ -876,6 +989,7 @@ async function handleCreateEmployee(e) {
         email: document.getElementById('newEmployeeEmail')?.value.trim(),
         phone: document.getElementById('newEmployeePhone')?.value.trim(),
         bank_name: document.getElementById('newEmployeeBankName')?.value.trim(),
+        bank_code: document.getElementById('newEmployeeBankName')?.selectedOptions?.[0]?.dataset?.code || '',
         account_number: document.getElementById('newEmployeeAccountNumber')?.value.trim(),
         account_holder: document.getElementById('newEmployeeAccountHolder')?.value.trim(),
         employee_id: generatedId  // ← ADD THIS LINE
@@ -899,36 +1013,12 @@ async function handleCreateEmployee(e) {
         return;
     }
 
-    // Generate username from name (first letter + last name)
-    const nameParts = payload.name.split(' ');
-    const firstName = nameParts[0] || '';
-    const lastName = nameParts.slice(1).join('') || '';
-    const username = (firstName.charAt(0) + lastName).toLowerCase().replace(/[^a-z0-9]/g, '');
-    
-    // Generate default password (should be changed later)
-    const defaultPassword = 'TempPass123!';
-
-    const registerPayload = {
-        username: username,
-        password: defaultPassword,
-        full_name: payload.name,
-        role: payload.type,
-        location: payload.location,
-        salary: payload.salary,
-        email: payload.email,
-        phone: payload.phone,
-        bank_name: payload.bank_name,
-        account_number: payload.account_number,
-        account_holder: payload.account_holder,
-        employee_id: generatedId
-    };
-
     try {
         showLoading(btn);
 
-        const res = await apiRequest('/api/register/', {
+        const res = await apiRequest('/api/employees/', {
             method: 'POST',
-            body: registerPayload
+            body: payload
         });
 
         if (!res.success) {
@@ -998,6 +1088,7 @@ async function createAccount(e) {
         phone: document.getElementById('accountPhone')?.value.trim(),
         email: document.getElementById('accountEmail')?.value.trim(),
         bank_name: document.getElementById('accountBankName')?.value,
+        bank_code: document.getElementById('accountBankName')?.selectedOptions?.[0]?.dataset?.code || '',
         account_number: document.getElementById('accountNumber')?.value.trim(),
         account_holder: document.getElementById('accountHolderName')?.value.trim(),
         employee_id: generatedId
@@ -1046,6 +1137,7 @@ async function createAccount(e) {
                 phone: payload.phone,
                 email: payload.email,
                 bank_name: payload.bank_name,
+                bank_code: payload.bank_code,
                 account_number: payload.account_number,
                 account_holder: payload.account_holder,
                 status: 'active'
@@ -1674,7 +1766,7 @@ async function handleClockIn(e) {
     }
 
     let url = action === 'out' ? '/api/attendance/clock_out/' : '/api/attendance/clock_in/';
-    let body = { employee_id: employeeId, date: new Date().toISOString().split('T')[0] };
+    let body = { employee: employeeId, employee_id: employeeId, date: new Date().toISOString().split('T')[0] };
 
     if (!markWithoutSelfie) {
         url = action === 'out'
@@ -1853,6 +1945,8 @@ async function processBulkPayment() {
         let message = `Processed ${successCount}/${checked.length} payments.`;
         if (errorCount > 0) {
             message += ` ${errorCount} errors.`;
+            const errorPreview = (results.errors || []).slice(0, 3).join('; ');
+            if (errorPreview) message += ` ${errorPreview}`;
         }
         
         showToast(message, successCount > 0 ? 'success' : 'error');
@@ -1895,6 +1989,10 @@ async function initiateIndividualPayment(empId) {
         if (res.success && res.data.authorization_url) {
             window.open(res.data.authorization_url, '_blank');
             showToast('Payment initiated. Complete in the new window.', 'info');
+        } else if (res.success && res.data.reference) {
+            showToast(res.data.message || 'Salary transfer initiated successfully', 'success');
+            await loadPaymentHistory();
+            updateDashboardStats();
         } else if (res.success && res.data.otp_sent) {
             AppState.currentPaymentReference = res.data.reference;
             showOTPModal();
@@ -3038,6 +3136,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (storedRefresh) AppState.refreshToken = storedRefresh;
 
         try {
+        if (isJwtExpired(AppState.accessToken)) {
+            console.log('Stored access token expired, refreshing before verification...');
+            const refreshed = await refreshAccessToken();
+            if (!refreshed) throw new Error('Cannot refresh token');
+        }
+
         console.log('Verifying token on page load...');
         const res = await apiRequest('/api/current-user/');
         
@@ -3076,6 +3180,7 @@ async function verifyBankAccountManual() {
     const bankSelect = document.getElementById('accountBankName');
     const holderInput = document.getElementById('accountHolderName');
     const statusEl = document.getElementById('verificationStatus');
+    return verifyBankAccountFields({ accountInput, bankSelect, holderInput, statusEl, manual: true });
     
     const accountNumber = accountInput?.value.trim();
     const selectedOption = bankSelect?.options[bankSelect.selectedIndex];
@@ -3118,81 +3223,28 @@ async function verifyBankAccountManual() {
             statusEl.textContent = `✓ Verified: ${res.data.account_name}`;
             statusEl.className = 'text-success';
             statusEl.textContent = `Verified: ${res.data.data.account_name}`;
+            AppState.lastVerifiedAccountKey = verificationKey;
             showToast('Account verified successfully', 'success');
         } else {
             holderInput.value = '';
             holderInput.style.background = '#f8d7da';
-            statusEl.textContent = '✗ Verification failed - enter name manually';
+            statusEl.textContent = 'Verification failed';
             statusEl.className = 'text-danger';
-            statusEl.textContent = `${res.message || res.data?.message || 'Verification failed'} - enter name manually`;
-            holderInput.readOnly = false;
-            holderInput.focus();
+            statusEl.textContent = res.message || res.data?.message || 'Verification failed';
+            holderInput.readOnly = true;
             showToast(res.message || res.data?.message || 'Verification failed', 'error');
             AppState.lastVerifiedAccountKey = null;
         }
     } catch (err) {
         holderInput.value = '';
-        holderInput.readOnly = false;
+        holderInput.readOnly = true;
         AppState.lastVerifiedAccountKey = null;
-        statusEl.textContent = 'Error verifying - enter name manually';
+        statusEl.textContent = 'Error verifying account. Try again later.';
         statusEl.className = 'text-warning';
         showToast('Verification service unavailable', 'error');
     } finally {
         AppState.pendingAccountVerificationKey = null;
         holderInput.disabled = false;
-    }
-}
-
-
-// ==========================================
-// PASSWORD CHANGE FUNCTIONS
-// ==========================================
-
-function showChangePasswordModal() {
-    document.getElementById('changePasswordForm').reset();
-    openModal('changePasswordModal');
-}
-
-async function handleChangePassword(event) {
-    event.preventDefault();
-    
-    const oldPassword = document.getElementById('oldPassword').value;
-    const newPassword = document.getElementById('newPassword').value;
-    const confirmPassword = document.getElementById('confirmPassword').value;
-    
-    if (newPassword !== confirmPassword) {
-        showToast('New passwords do not match', 'error');
-        return;
-    }
-    
-    if (newPassword.length < 8) {
-        showToast('New password must be at least 8 characters long', 'error');
-        return;
-    }
-    
-    showLoading(null, document.getElementById('globalSpinner'));
-    
-    try {
-        const res = await apiRequest('/api/change-password/', {
-            method: 'POST',
-            body: {
-                old_password: oldPassword,
-                new_password: newPassword,
-                confirm_password: confirmPassword
-            }
-        });
-        
-        if (res.success) {
-            showToast('Password changed successfully! You will be logged out for security.', 'success');
-            closeModal('changePasswordModal');
-            setTimeout(() => logout(), 2000); // Logout after 2 seconds
-        } else {
-            showToast(res.message || 'Failed to change password', 'error');
-        }
-    } catch (err) {
-        showToast('Error changing password. Please try again.', 'error');
-    } finally {
-        hideLoading(null, document.getElementById('globalSpinner'));
     }
 }
 
@@ -3273,10 +3325,6 @@ const EXPOSED_FUNCTIONS = {
     exportAllEmployees,        // <-- THIS WAS MISSING
     exportPaymentHistory,
     confirmExport,
-    
-    // Password Change
-    showChangePasswordModal,
-    handleChangePassword,
     
     // Filters
     filterHistory,

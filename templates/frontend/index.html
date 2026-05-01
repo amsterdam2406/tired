@@ -51,6 +51,9 @@
             </div>
             <div class="nav-user">
                 <span id="currentUserName"></span>
+                <button type="button" onclick="showChangePasswordModal()" class="btn btn-sm btn-warning me-2">
+                    <i class="fas fa-key"></i> Change Password
+                </button>
                 <button type="button" onclick="logout()" class="btn btn-sm btn-danger">
                     <i class="fas fa-sign-out-alt"></i> Logout
                 </button>
@@ -301,9 +304,6 @@
                                 <button onclick="showBulkPaymentModal()" class="btn btn-success">
                                     <i class="fas fa-users"></i> Bulk Payment
                                 </button>
-                                <button onclick="exportPaymentHistory()" class="btn btn-info">
-                                    <i class="fas fa-download"></i> Export History
-                                </button>
                             </div>
                         </div>
 
@@ -322,13 +322,13 @@
                             <table class="data-table">
                                 <thead>
                                     <tr>
-                                        <th><input type="checkbox" id="selectAllPayments" onchange="toggleAllPayments()"></th>
                                         <th>Employee ID</th>
                                         <th>Name</th>
                                         <th>Bank Account</th>
                                         <th>Base Salary</th>
                                         <th>Deductions</th>
                                         <th>Net Salary</th>
+                                        <th>Status</th>
                                         <th>Action</th>
                                     </tr>
                                 </thead>
@@ -544,7 +544,6 @@
                                         <th>Type</th>
                                         <th>Date Sacked</th>
                                         <th>Offense/Reason</th>
-                                        <th>Terminated By</th>
                                         <th>Actions</th>
                                     </tr>
                                 </thead>
@@ -618,11 +617,14 @@
                     </div>
                     <div class="form-group">
                         <label for="newEmployeeAccountNumber">Account Number</label>
-                        <input type="text" id="newEmployeeAccountNumber" class="form-control" maxlength="10" required>
+                        <input type="text" id="newEmployeeAccountNumber" class="form-control" maxlength="10" required
+                            placeholder="Enter 10-digit number">
+                        <small id="newEmployeeVerificationStatus" class="text-muted">Enter 10-digit account number to auto-verify</small>
                     </div>
                     <div class="form-group">
                         <label for="newEmployeeAccountHolder">Account Holder Name</label>
-                        <input type="text" id="newEmployeeAccountHolder" class="form-control" required>
+                        <input type="text" id="newEmployeeAccountHolder" class="form-control" required
+                            placeholder="Auto-filled after verification" readonly style="background: #f8f9fa;">
                     </div>
                     <button type="submit" class="btn btn-primary btn-block" id="createEmployeeBtn">
                         Add Employee
@@ -651,17 +653,12 @@
                             <option value="out">Clock Out</option>
                         </select>
                     </div>
-                    <div class="form-group">
-                        <label>
-                            <input type="checkbox" id="markWithoutSelfie"> Mark as Present without Selfie
-                        </label>
-                    </div>
-                    <div class="camera-section" id="cameraSection">
+                    <div class="camera-section">
                         <video id="cameraVideo" autoplay muted playsinline></video>
                         <canvas id="cameraCanvas" style="display:none;"></canvas>
                         <div id="capturedImage"></div>
                     </div>
-                    <div class="btn-group" id="cameraButtons">
+                    <div class="btn-group">
                         <button type="button" onclick="startCamera()" class="btn btn-primary">
                             <i class="fas fa-camera"></i> Start Camera
                         </button>
@@ -669,7 +666,7 @@
                             <i class="fas fa-camera"></i> Capture Selfie
                         </button>
                     </div>
-                    <button type="submit" class="btn btn-primary btn-block" id="submitClockBtn">
+                    <button type="submit" class="btn btn-primary btn-block" id="submitClockBtn" disabled>
                         Submit Attendance
                     </button>
                 </form>
@@ -933,6 +930,32 @@
                 <div class="modal-footer">
                     <button onclick="closeModal('employeeDetailModal')" class="btn btn-secondary">Close</button>
                 </div>
+            </div>
+        </div>
+        
+        <!-- Change Password Modal -->
+        <div id="changePasswordModal" class="modal">
+            <div class="modal-content modal-sm">
+                <div class="modal-header">
+                    <h3>Change Password</h3>
+                    <span class="close" onclick="closeModal('changePasswordModal')">&times;</span>
+                </div>
+                <form id="changePasswordForm" onsubmit="handleChangePassword(event)">
+                    <div class="form-group">
+                        <label for="oldPassword">Current Password</label>
+                        <input type="password" id="oldPassword" class="form-control" required autocomplete="current-password">
+                    </div>
+                    <div class="form-group">
+                        <label for="newPassword">New Password</label>
+                        <input type="password" id="newPassword" class="form-control" required autocomplete="new-password">
+                    </div>
+                    <div class="form-group">
+                        <label for="confirmPassword">Confirm New Password</label>
+                        <input type="password" id="confirmPassword" class="form-control" required autocomplete="new-password">
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-block">Change Password</button>
+                    <button type="button" onclick="closeModal('changePasswordModal')" class="btn btn-secondary btn-block">Cancel</button>
+                </form>
             </div>
         </div>
         

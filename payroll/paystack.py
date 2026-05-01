@@ -168,6 +168,70 @@ class PaystackAPI:
         except Exception as e:
             logger.error(f"Paystack verify account unexpected error: {e}")
             return {'status': False, 'message': str(e), 'data': None}
+
+    def get_transfer_balance(self):
+        """Get Paystack transfer wallet balance."""
+        url = f"{self.BASE_URL}/balance"
+        try:
+            response = requests.get(url, headers=self.headers, timeout=20)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Paystack balance error: {e}")
+            return {'status': False, 'message': str(e), 'data': []}
+        except Exception as e:
+            logger.error(f"Paystack balance unexpected error: {e}")
+            return {'status': False, 'message': str(e), 'data': []}
+
+    def initiate_transfer(self, amount, recipient_code, reference, reason='Salary payment'):
+        """Initiate a single Paystack transfer."""
+        url = f"{self.BASE_URL}/transfer"
+        payload = {
+            "source": "balance",
+            "amount": int(amount),
+            "recipient": recipient_code,
+            "reference": reference,
+            "reason": reason,
+        }
+        try:
+            response = requests.post(url, json=payload, headers=self.headers, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Paystack initiate transfer error: {e}")
+            return {'status': False, 'message': str(e), 'data': None}
+        except Exception as e:
+            logger.error(f"Paystack initiate transfer unexpected error: {e}")
+            return {'status': False, 'message': str(e), 'data': None}
+
+    def bulk_transfer(self, transfers):
+        """Initiate multiple Paystack transfers."""
+        url = f"{self.BASE_URL}/transfer/bulk"
+        payload = {"currency": "NGN", "source": "balance", "transfers": transfers}
+        try:
+            response = requests.post(url, json=payload, headers=self.headers, timeout=45)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Paystack bulk transfer error: {e}")
+            return {'status': False, 'message': str(e), 'data': None}
+        except Exception as e:
+            logger.error(f"Paystack bulk transfer unexpected error: {e}")
+            return {'status': False, 'message': str(e), 'data': None}
+
+    def verify_transfer(self, reference):
+        """Verify a Paystack transfer by reference."""
+        url = f"{self.BASE_URL}/transfer/verify/{reference}"
+        try:
+            response = requests.get(url, headers=self.headers, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Paystack verify transfer error: {e}")
+            return {'status': False, 'message': str(e), 'data': {'status': 'failed'}}
+        except Exception as e:
+            logger.error(f"Paystack verify transfer unexpected error: {e}")
+            return {'status': False, 'message': str(e), 'data': {'status': 'failed'}}
         
 # Nigerian Bank Codes for Paystack
 NIGERIAN_BANKS = {

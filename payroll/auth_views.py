@@ -243,6 +243,7 @@ def register_view(request):
                     'phone': data.get('phone', ''),
                     'email': email,
                     'bank_name': data.get('bank_name'),
+                    'bank_code': data.get('bank_code') or '',
                     'account_number': data.get('account_number'),
                     'account_holder': data.get('account_holder'),
                     'join_date': timezone.now().date()

@@ -68,6 +68,8 @@ class Employee(models.Model):
     
     # Bank Details (Nigerian Banks - Naira)
     bank_name = models.CharField(max_length=100)
+    bank_code = models.CharField(max_length=20, blank=True, null=True)
+    paystack_recipient_code = models.CharField(max_length=100, blank=True, null=True)
     account_number = models.CharField(max_length=10)
     account_holder = models.CharField(max_length=200)
     
